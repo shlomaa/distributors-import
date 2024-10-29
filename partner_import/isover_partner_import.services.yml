@@ -1,0 +1,4 @@
+services:
+  partner_import:
+    class: Drupal\partner_import\PartnerImport
+    arguments: ['@entity_type.manager', '@current_user']

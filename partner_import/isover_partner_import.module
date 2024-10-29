@@ -1,0 +1,120 @@
+<?php
+/**
+ * @file
+ *  Module to import partner products.
+ */
+
+use Drupal\node\Entity\Node;
+use Drupal\config_pages\Entity\ConfigPages;
+use Drupal\commerce_product\Entity\ProductVariation;
+
+function partner_import_cron() {
+  $query = \Drupal::entityQuery('node')->condition('type', 'partner')->sort('field_import_date', 'ASC');
+  $partners = [];
+  $nids = $query->execute();
+  if (!empty($nids)) {
+    $partners = Node::loadMultiple($nids);
+  }
+
+  foreach ($partners as $partner) {
+    $last_updated = !$partner->get('field_import_date')->isEmpty() ? strtotime($partner->get('field_import_date')->value) : FALSE;
+    if (!$partner->isPublished() || $partner->get('field_import_url')->isEmpty()) {
+      continue;
+    }
+    elseif ($last_updated && (time() - $last_updated) < 60) {
+      \Drupal::logger('partner_import')->info(t($partner->label() . ': Импорт пропущен (запуск не чаще раза в минуту).'));
+      continue;
+    }
+
+    \Drupal::logger('partner_import')->info(t($partner->label() . ': Импорт начат.'));
+
+    if (empty(\Drupal::service('partner_import')->getXML($partner->get('field_import_url')->value))) {
+      \Drupal::logger('partner_import')->info(t($partner->label() . ': Данные не получены.'));
+      \Drupal::service('partner_import')->disablePartner($partner, t('Невозможно получить корректный xml файл выгрузки.'));
+      continue;
+    }
+
+    \Drupal::service('partner_import')->importPartner($partner);
+  }
+}
+
+/**
+ * Implements hook_node_update().
+ */
+function partner_import_node_update(Node $node) {
+  if ($node->bundle() !== 'partner') {
+    return;
+  }
+  $old = $node->original;
+  $config = ConfigPages::load('site_settings');
+  $emails = !$config->get('field_notify_partner_imp_email')->isEmpty()
+    ? $config->get('field_notify_partner_imp_email')->getValue()
+    : [];
+
+  if ($node->get('field_import_count')->isEmpty()
+    || $node->get('field_import_regions_count')->isEmpty()
+    || empty($emails)
+  ) {
+    return;
+  }
+
+  $messages = [];
+
+  // Check if it was unpublished.
+  if (!$node->isPublished() && $old->isPublished()) {
+    $messages[] = t('Партнер был отключен (вручную или изза отстутвсвия выгрузки XML');
+  }
+
+  // Check if something was removed in products.
+  $product_count_before = $old->get('field_import_count')->value;
+  $product_count_after = $node->get('field_import_count')->value;
+  if ($product_count_before != $product_count_after) {
+    if ($product_count_after < $product_count_before) {
+      $messages[] = t('Количество проодуктов уменьшилось с @before до @after', ['@before' => $product_count_before, '@after' => $product_count_after]);
+    }
+    else {
+      $messages[] = t('Количество проодуктов увеличилось с @before до @after', ['@before' => $product_count_before, '@after' => $product_count_after]);
+    }
+  }
+
+  // Check if something was removed in regions.
+  $region_count_before = $old->get('field_import_regions_count')->value;
+  $region_count_after = $node->get('field_import_regions_count')->value;
+  if ($region_count_before != $region_count_after && $region_count_after < $region_count_before) {
+    if ($region_count_after < $region_count_before) {
+      $messages[] = t('Количество регионов уменьшилось с @before до @after', ['@before' => $region_count_before, '@after' => $region_count_after]);
+    }
+    else {
+      $messages[] = t('Количество регионов увеличилось с @before до @after', ['@before' => $region_count_before, '@after' => $region_count_after]);
+    }
+  }
+
+  if (!empty($messages)) {
+    $mailManager = \Drupal::service('plugin.manager.mail');
+    $to = [];
+    foreach ($emails as $email) {
+      $to[] = $email['value'];
+    }
+    $params = [];
+    $params['message'] = implode("\n\r", $messages);
+    $params['partner_title'] = $node->label();
+    $mailManager->mail('partner_import', 'import_notify', implode(', ', $to), 'ru', $params, NULL, TRUE);
+  }
+}
+
+/**
+ * Implements hook_mail().
+ */
+function partner_import_mail($key, &$message, $params) {
+  $options = [
+    'langcode' => $message['langcode'],
+  ];
+
+  switch ($key) {
+    case 'import_notify':
+      $message['from'] = \Drupal::config('system.site')->get('mail');
+      $message['subject'] = t('Импорт партнера: @title', ['@title' => $params['partner_title']], $options);
+      $message['body'][] = $params['message'];
+      break;
+  }
+}

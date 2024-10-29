@@ -1,0 +1,8 @@
+name: "Partner Products Import"
+type: module
+description: "Hourly import of partners products"
+core_version_requirement: '9.x'
+package: Custom
+dependencies:
+  - drupal:node
+  - drupal:taxonomy
